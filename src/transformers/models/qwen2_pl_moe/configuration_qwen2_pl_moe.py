@@ -38,9 +38,10 @@ class Qwen2PlMoeConfig(Qwen2Config):
             think 模式的控制 token ID。检测到时 → routing_index = 1（expert 1 / think）。
         no_think_token_id (`int`, *optional*):
             no_think 模式的控制 token ID。检测到时 → routing_index = 0（expert 0 / no_think）。
-        default_routing_index (`int`, *optional*, defaults to 1):
+        default_routing_index (`int`, *optional*, defaults to 0):
             当未检测到任何控制 token、或未配置任何 token ID 时的默认路由。
-            默认为 1（think 模式），这是更安全的选项——宁可多推理也不跳过推理。
+            默认为 0（no_think / expert 0），因为初始化阶段共享层来自 Qwen2.5-7B-Instruct，
+            与 expert 0 的 MLP 完全兼容。fine-tune 完成后可根据需求修改。
         **kwargs:
             其余参数透传给 `Qwen2Config`。
     """
@@ -51,7 +52,7 @@ class Qwen2PlMoeConfig(Qwen2Config):
         self,
         think_token_id: int = None,
         no_think_token_id: int = None,
-        default_routing_index: int = 1,
+        default_routing_index: int = 0,
         **kwargs,
     ):
         super().__init__(**kwargs)

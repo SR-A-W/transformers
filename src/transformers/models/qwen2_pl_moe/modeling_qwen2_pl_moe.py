@@ -352,7 +352,7 @@ def _determine_routing_index(input_ids: torch.LongTensor, config: Qwen2PlMoeConf
     """
     think_id = config.think_token_id
     no_think_id = config.no_think_token_id
-    default_idx = getattr(config, "default_routing_index", 1)
+    default_idx = getattr(config, "default_routing_index", 0)
 
     # 未配置任何控制 token → 直接返回默认值
     if think_id is None and no_think_id is None:
@@ -392,9 +392,9 @@ class Qwen2PlMoeModel(Qwen2PlMoePreTrainedModel):
     """骨干模型：在 forward 开头确定 routing_index，并透传给每一层的 MLP。
 
     routing_index 的来源（按优先级）：
-    1. kwargs 中显式传入的 routing_index（来自 generate 阶段的 prepare_inputs_for_generation 缓存）
-    2. 根据 input_ids 中的控制 token 自动计算（训练阶段、generate 首步）
-    3. 兜底使用 config.default_routing_index（默认 = 1 / think）
+    1. kwargs 中显式传入的 routing_index（来自 generate 阶段的 prepare_inputs_for_generation 缓存，或用户手动指定）
+    2. 根据 input_ids 中的控制 token 自动计算（训练阶段）
+    3. 兜底使用 config.default_routing_index（默认 = 0 / no_think）
     """
 
     def __init__(self, config: Qwen2PlMoeConfig):
@@ -442,7 +442,7 @@ class Qwen2PlMoeModel(Qwen2PlMoePreTrainedModel):
         # 优先级 3：兜底默认值
         #   - 仅在 input_ids 为 None（只传了 inputs_embeds）且未显式指定 routing_index 时触发
         if routing_index is None:
-            routing_index = getattr(self.config, "default_routing_index", 1)
+            routing_index = getattr(self.config, "default_routing_index", 0)
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
@@ -504,9 +504,10 @@ class Qwen2PlMoeModel(Qwen2PlMoePreTrainedModel):
 class Qwen2PlMoeForCausalLM(Qwen2PlMoePreTrainedModel, GenerationMixin):
     """Causal LM 顶层：使用 Qwen2PlMoeModel 作为 backbone。
 
-    重写 prepare_inputs_for_generation 以在 generate 阶段正确缓存路由决策：
-    - 首步（无 KV cache）：从完整 input_ids 计算 routing_index 并缓存到模型实例
-    - 后续步骤：使用缓存的 routing_index（因为后续步骤的 input_ids 只包含新生成的 token，无法检测控制 token）
+    重写 prepare_inputs_for_generation 以在 generate 阶段正确传递路由决策：
+    - 若用户通过 generate(routing_index=N) 显式指定了路由，则始终使用该值
+    - 若未显式指定，则从 input_ids 中的控制 token 自动检测
+    - 结果缓存到 self._cached_routing_index 供调试/测试检查
     """
 
     _tied_weights_keys = ["lm_head.weight"]
@@ -596,18 +597,25 @@ class Qwen2PlMoeForCausalLM(Qwen2PlMoePreTrainedModel, GenerationMixin):
     ):
         """重写以在 generate 阶段正确传递路由决策。
 
+        路由优先级：
+        1. 用户通过 generate(routing_index=N) 显式传入 → 直接使用，不做自动检测
+        2. 未传入（routing_index=None）→ 从 input_ids 中的控制 token 自动检测
+        3. 自动检测也未命中 → 使用 config.default_routing_index
+
         关键事实：在 generate 的自回归循环中，传入此方法的 input_ids 始终是
         **完整的累积序列**（原始 prompt + 已生成的 token），而非只有新 token。
         裁剪发生在父类方法内部（cache_dependant_input_preparation）。
 
-        因此，我们可以直接从 input_ids 中扫描控制 token 来确定路由。
-        结果缓存到 self._cached_routing_index 供外部检查（调试/测试用途）。
-
-        注意：新版 transformers 的 generate 在首步之前就会创建空 DynamicCache，
-        所以 past_key_values 从来不是 None，不能用于判断是否是首步。
+        注意：routing_index 参数在 generate 循环中会通过 model_kwargs 持续传递，
+        所以用户在首步传入的值会自动保留到后续所有步骤。
         """
-        # 从完整 input_ids 计算路由（每步都重新计算，开销可忽略）
-        self._cached_routing_index = _determine_routing_index(input_ids, self.config)
+        # 路由决策：优先使用用户显式传入的值，否则自动检测
+        if routing_index is not None:
+            # 用户通过 generate(routing_index=N) 显式指定
+            self._cached_routing_index = routing_index
+        else:
+            # 从完整 input_ids 中自动检测控制 token
+            self._cached_routing_index = _determine_routing_index(input_ids, self.config)
 
         # 调用父类的 prepare_inputs_for_generation 获取标准 model_inputs
         model_inputs = super().prepare_inputs_for_generation(
