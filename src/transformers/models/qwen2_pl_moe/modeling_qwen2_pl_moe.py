@@ -591,6 +591,7 @@ class Qwen2PlMoeForCausalLM(Qwen2PlMoePreTrainedModel, GenerationMixin):
         attention_mask=None,
         inputs_embeds=None,
         cache_position=None,
+        routing_index=None,
         **kwargs,
     ):
         """重写以在 generate 阶段正确传递路由决策。
